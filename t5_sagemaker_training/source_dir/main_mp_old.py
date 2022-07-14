@@ -601,7 +601,7 @@ def fsdp_main(rank, world_size, args):
         # memory
         memmax.stop()
         if cfg.track_memory:
-            print(f"total memory reserved: {mem_reserved_tracker}")
+            # print(f"total memory reserved: {mem_reserved_tracker}")
             print(f"total memory allocated: {mem_alloc_tracker}")
 
         print(f"Training accuracy: {train_acc_tracking}")
