@@ -23,7 +23,7 @@ hyperparameters = {
     "allreduce_post_accumulation": 1,
     "allreduce_post_accumulation_fp16": 1,
 }
-
+volume_size = 500
 pytorch_estimator = PyTorch(
     role='arn:aws:iam::320567679581:role/fsdp-sagemaker-experiments', # TODO
     #hyperparameters={'model_size': 'large'},
@@ -39,6 +39,7 @@ pytorch_estimator = PyTorch(
     #output_path='<optional s3 output path>',
     framework_version="1.11.0",
     py_version="py38",
+    volume_size=volume_size,
     # dependencies=['source_dir/t5_11/', 'source_dir/t5_11/datasets_grammar/gtrain_1k.csv', '/home/ubuntu/anaconda3/envs/fsdp-sagemaker'],
     region='us-west-2',
     # distribution={
