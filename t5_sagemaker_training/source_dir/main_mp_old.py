@@ -74,7 +74,7 @@ import tqdm
 # config
 import config
 from utils.calculations_utils import calc_flop
-
+import performance 
 
 # some globals
 g_port = "12369"
@@ -398,6 +398,8 @@ def fsdp_main(rank, world_size, args):
 
     # model = model.to(rank)
     # model = DDP(model)
+    if rank == 0:
+        memmax = performance.Memory_Maximizer()
     if cfg.hf_activation_checkpointing:
         model.gradient_checkpointing_enable()
         print(f"HF Activation checkpointing enabled\n")
@@ -482,6 +484,7 @@ def fsdp_main(rank, world_size, args):
         train_acc_tracking = []
         val_acc_tracking = []
         training_start_time = time.time()
+        memmax.start()
 
     torch_profiler = None
     """with torch.profiler.profile(
@@ -520,6 +523,8 @@ def fsdp_main(rank, world_size, args):
             sampler=sampler1,
             profiler=torch_profiler,
         )
+        if rank == 0:
+            memmax.update()
 
         if cfg.run_validation:
             test_accuracy = validation(model, rank, world_size, test_loader)
@@ -594,6 +599,7 @@ def fsdp_main(rank, world_size, args):
         print()
 
         # memory
+        memmax.stop()
         if cfg.track_memory:
             print(f"total memory reserved: {mem_reserved_tracker}")
             print(f"total memory allocated: {mem_alloc_tracker}")
