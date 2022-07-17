@@ -80,6 +80,7 @@ import performance
 g_port = "12369"
 g_addr = "localhost"
 
+os.environ["TRANSFORMERS_CACHE"] = '/tmp'
 
 def _is_rank_0():
     return 0 == os.getenv("RANK")
