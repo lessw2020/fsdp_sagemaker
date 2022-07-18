@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from statistics import stdev
-
+from typing import Dict, Union, Any, Tuple
 # from torchvision import datasets, transforms
 
 
@@ -74,17 +74,31 @@ import tqdm
 # config
 import config
 from utils.calculations_utils import calc_flop
-import performance 
-
+import performance
+from subprocess import call
+os.environ["TRANSFORMERS_CACHE"] = '/tmp'
 # some globals
 g_port = "12369"
 g_addr = "localhost"
+# os.system('su -')
+# os.system('apt-get install sudo -y')
+# os.system('apt-get install mdadm -y')
+# os.system('sudo apt-get -y install yum')
+# os.system('apt-get install xfsprogs')
+# os.system('chmod +x ./performance/dirve_mount.sh')
+# # os.environ['N_DRIVES'] = '8'
+# rc = call("./performance/dirve_mount.sh")
 
-os.environ["TRANSFORMERS_CACHE"] = '/tmp'
+# print("*******************************************************")
+# os.system('df -h')
+
+# print("*******************************************************")
 
 def _is_rank_0():
     return 0 == os.getenv("RANK")
 
+def is_sm_run():
+    return "TRAINING_JOB_NAME" in os.environ
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PyTorch fsdp T5.11 Example")
@@ -109,8 +123,55 @@ def parse_args():
     return args
 
 
+def initialize_process_group(setup_args: Dict[str, Union[int, str]], backend: str = 'nccl') -> None:
+    """
+    Initialize process group.
+    """
+    master_addr, master_port = setup_args['master_addr'], setup_args['master_port']
+    os.environ['MASTER_ADDR'] = master_addr
+    os.environ['MASTER_PORT'] = master_port
+    args = {'backend': backend if torch.cuda.is_available() else 'gloo',
+            'rank': setup_args['global_rank'],
+            'world_size': setup_args['world_size']}
+    dist.init_process_group(**args)
+
+
+def get_setup_defaults(local_rank: int) -> Dict[str, Union[str, int]]:
+    gpus_per_node = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    world_size = get_num_nodes() * gpus_per_node
+    node_rank = get_node_rank()
+    global_rank = (node_rank * gpus_per_node) + local_rank
+    print(f'local rank {local_rank} global rank {global_rank} world size {world_size}')
+    ddp_setup_args = {'global_rank': global_rank,
+                      'node_rank': node_rank,
+                      'local_rank': local_rank,
+                      'world_size': world_size,
+                      'master_addr': os.environ.get('MASTER_ADDR', 'localhost'),
+                      'master_port': '12355'}  # os.environ.get('MASTER_PORT', str(default_port))}
+    return ddp_setup_args
+    
+def sync_all_device():
+    # setup() has already configured CUDA_VISIBLE_DEVICES such that each
+    # process exclusively works on its own set of devices. So it's safe to
+    # do device sync here
+    for d in range(torch.cuda.device_count()):
+        torch.cuda.synchronize(d)
+def get_num_nodes() -> int:
+        # if is_sm_run():
+        import json
+        cluster_inf = json.loads(os.environ.get('SM_RESOURCE_CONFIG'))
+        return len(cluster_inf['hosts'])
+        # return 1
+
+
+def get_node_rank() -> int:
+    # if is_sm_run():
+    import json
+    cluster_inf = json.loads(os.environ.get('SM_RESOURCE_CONFIG'))
+    return cluster_inf['hosts'].index(cluster_inf['current_host'])
+    # return 0
 # ----------------   Main functions --------------------
-def get_policies(cfg, rank):
+def get_policies(cfg, local_rank):
 
     """establish current policies for mixed precision and fsdp wrapping"""
 
@@ -123,12 +184,12 @@ def get_policies(cfg, rank):
 
         if bf16_ready and not cfg.use_fp16:
             mixed_precision_policy = policies.bfSixteen
-            if rank == 0:
+            if local_rank == 0:
 
                 print(f"bFloat16 enabled for mixed precision - using bfSixteen policy")
         elif cfg.use_fp16:
             mixed_precision_policy = policies.fpSixteen
-            if rank == 0:
+            if local_ == 0:
                 print(f"FP16 enabled. ")
         else:
             # mixed_precision_policy = policies.fpSixteen
@@ -145,33 +206,35 @@ def get_policies(cfg, rank):
     return mixed_precision_policy, wrapping_policy
 
 
-def setup(rank, world_size, cfg):
-    os.environ["MASTER_ADDR"] = g_addr
-    os.environ["MASTER_PORT"] = cfg.host_port
+# def setup(, world_size, cfg):
+#     os.environ["MASTER_ADDR"] = g_addr
+#     os.environ["MASTER_PORT"] = cfg.host_port
 
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+#     # initialize the process group
+#     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
 def setup_environ_flags():
     os.environ["TORCH_SHOW_CPP_STACKTRACES"] = str(1)
+    
 
 
 def cleanup():
     dist.destroy_process_group()
 
 
-def clear_gpu_cache(rank=None):
-    print(f"clearing cache for rank {rank}")
+def clear_gpu_cache(local_rank=None):
+    print(f"clearing cache for rank {local_rank}")
     torch.cuda.empty_cache()
 
 
-def setup_tasks(rank, world_size, cfg):
-    """keep the basic setup list here"""
-    setup(rank, world_size, cfg)
-    # clear_gpu_cache() - need to call torch set device first?
-    # set_printing()
-    setup_environ_flags()
+# def setup_tasks(rank, world_size, cfg):
+#     """keep the basic setup list here"""
+#     # setup(rank, world_size, cfg)
+#     initialize_process_group()
+#     # clear_gpu_cache() - need to call torch set device first?
+#     # set_printing()
+#     setup_environ_flags()
 
 
 from datetime import datetime
@@ -190,8 +253,7 @@ def get_date_of_run():
 def train(
     args,
     model,
-    rank,
-    world_size,
+    local_rank,
     train_loader,
     optimizer,
     epoch,
@@ -199,17 +261,17 @@ def train(
     profiler=None,
 ):
     model.train()
-    ddp_loss = torch.zeros(2).to(rank)
+    ddp_loss = torch.zeros(2).to(local_rank)
 
     if sampler:
         sampler.set_epoch(epoch)
-    if rank == 0:
+    if local_rank == 0:
         inner_pbar = tqdm.tqdm(
             range(len(train_loader)), colour="blue", desc="r0 Training Epoch"
         )
     for batch in train_loader:
         for key in batch.keys():
-            batch[key] = batch[key].to(rank)
+            batch[key] = batch[key].to(local_rank)
 
         """print("************************")
         print(
@@ -235,14 +297,14 @@ def train(
         optimizer.step()
         ddp_loss[0] += loss.item()
         ddp_loss[1] += len(batch)
-        if rank == 0:
+        if local_rank == 0:
             inner_pbar.update(1)
         if profiler:
             profiler.step()
 
     dist.reduce(ddp_loss, 0, op=dist.ReduceOp.SUM)
     train_accuracy = ddp_loss[0] / ddp_loss[1]
-    if rank == 0:
+    if local_rank == 0:
         inner_pbar.close()
 
         print(
@@ -254,18 +316,18 @@ def train(
 # ---- Validation ---------------
 
 
-def validation(model, rank, world_size, test_loader):
+def validation(model, local_rank, test_loader):
     model.eval()
     correct = 0
-    ddp_loss = torch.zeros(3).to(rank)
-    if rank == 0:
+    ddp_loss = torch.zeros(3).to(local_rank)
+    if local_rank == 0:
         inner_pbar = tqdm.tqdm(
             range(len(test_loader)), colour="green", desc="r0 Validation Epoch"
         )
     with torch.no_grad():
         for batch in test_loader:
             for key in batch.keys():
-                batch[key] = batch[key].to(rank)
+                batch[key] = batch[key].to(local_rank)
             output = model(
                 input_ids=batch["source_ids"],
                 attention_mask=batch["source_mask"],
@@ -274,7 +336,7 @@ def validation(model, rank, world_size, test_loader):
             ddp_loss[0] += output["loss"].item()  # sum up batch loss
             ddp_loss[1] += len(batch)
 
-            if rank == 0:
+            if local_rank == 0:
                 inner_pbar.update(1)
             # pred = output.logits.argmax(
             #    dim=1, keepdim=True
@@ -285,36 +347,39 @@ def validation(model, rank, world_size, test_loader):
     dist.reduce(ddp_loss, 0, op=dist.ReduceOp.SUM)
     val_loss = ddp_loss[0] / ddp_loss[1]
 
-    if rank == 0:
+    if local_rank == 0:
         # test_loss = ddp_loss[0] / ddp_loss[1]
         inner_pbar.close()
         print(f"Validation Loss: {val_loss:.4f}")
     return val_loss
 
 
-def sync_all_device():
-    # setup() has already configured CUDA_VISIBLE_DEVICES such that each
-    # process exclusively works on its own set of devices. So it's safe to
-    # do device sync here
-    for d in range(torch.cuda.device_count()):
-        torch.cuda.synchronize(d)
-
 
 # ---- fsdp main ------------------------------------------------------------
 
 
-def fsdp_main(rank, world_size, args):
+def fsdp_main(local_rank: int, *args: Any):
     """main process within each process"""
-    cfg = config.benchmark_config()  # loads from defaults
-
-    if rank == 0:
+    cfg = config.benchmark_config()
+      # loads from defaults
+    gpus_per_node = torch.cuda.device_count()
+    
+    world_size= get_num_nodes() * gpus_per_node
+    if local_rank == 0:
         print(f"--> running with these defaults {cfg}")
 
-    setup_tasks(rank, world_size, cfg)
+    setup_args = get_setup_defaults(local_rank=local_rank)
+    initialize_process_group(setup_args)
+    if torch.cuda.is_available() and torch.distributed.is_initialized():
+        torch.cuda.set_device(local_rank)
+
+    print(f"finished init for local rank {local_rank}")
+
+    # setup_tasks(rank, world_size, cfg)
 
     fsdp_unit_params = cfg.fsdp_unit_size
     batch_size = cfg.batch_size
-    if rank == 0:
+    if local_rank == 0:
         print(f"\n BatchSize = {batch_size}\n")
 
     val_batch_size = cfg.val_batch_size
@@ -346,7 +411,7 @@ def fsdp_main(rank, world_size, args):
     # tokenizer = T5Tokenizer.from_pretrained(model_name)
     # dataset_name = "jfleg_train.csv"
 
-    if rank == 0:
+    if local_rank == 0:
         print(f"--> Training for {model_name}")
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n--> {model_name} has {total_params/1e6} Million params\n")
@@ -374,9 +439,9 @@ def fsdp_main(rank, world_size, args):
         print(f"using dataset {cfg.dataset_test}")
 
     sampler1 = DistributedSampler(
-        train_dataset, rank=rank, num_replicas=world_size, shuffle=True
+        train_dataset, rank=local_rank, num_replicas=world_size, shuffle=True
     )
-    sampler2 = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
+    sampler2 = DistributedSampler(val_dataset, rank=local_rank, num_replicas=world_size)
 
     print(f"batch size = {batch_size}")
 
@@ -389,8 +454,8 @@ def fsdp_main(rank, world_size, args):
     train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(val_dataset, **test_kwargs)
 
-    torch.cuda.set_device(rank)
-    clear_gpu_cache(rank)
+    torch.cuda.set_device(local_rank)
+    clear_gpu_cache(local_rank)
 
     # init_start_event = torch.cuda.Event(enable_timing=True)
     # init_end_event = torch.cuda.Event(enable_timing=True)
@@ -399,7 +464,7 @@ def fsdp_main(rank, world_size, args):
 
     # model = model.to(rank)
     # model = DDP(model)
-    if rank == 0:
+    if local_rank == 0:
         memmax = performance.Memory_Maximizer()
     if cfg.hf_activation_checkpointing:
         model.gradient_checkpointing_enable()
@@ -436,7 +501,7 @@ def fsdp_main(rank, world_size, args):
 
     # model.to(rank)
 
-    if rank == 0 and cfg.print_sharding_plan:
+    if local_rank == 0 and cfg.print_sharding_plan:
         print(f"model ")
         fn = printable_model_name + "-sharded_layout.txt"
         with open(fn, "w") as external_file:
@@ -466,12 +531,12 @@ def fsdp_main(rank, world_size, args):
         )
     else:
         optimizer = optim.AdamW(model.parameters(), lr=lr)
-        if rank == 0:
+        if local_rank == 0:
             print(f"--> optimizer is AdamW")
 
     scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
     epochs = cfg.num_epochs
-    if rank == 0:
+    if local_rank == 0:
         print(f"Training for {epochs} epochs")
 
     best_train_accuracy = float("-inf")
@@ -480,7 +545,7 @@ def fsdp_main(rank, world_size, args):
     best_val_loss = float("inf")
 
     # --- main training loop - todo, this needs to be modularized
-    if rank == 0:
+    if local_rank == 0:
         dur = []
         train_acc_tracking = []
         val_acc_tracking = []
@@ -502,37 +567,36 @@ def fsdp_main(rank, world_size, args):
         record_shapes=True,
     ) as torch_profiler:
     """
-    if rank == 0 and cfg.track_memory:
+    if local_rank == 0 and cfg.track_memory:
         fn = cfg.model_name + "memory_tracking.txt"
         mem_alloc_tracker = []
         mem_reserved_tracker = []
     start_training_time = time.time()
 
     for epoch in range(1, epochs + 1):
-        if rank == 0:
+        if local_rank == 0:
             print(f"\n--> Starting Epoch {epoch}")
 
             t0 = time.time()
         train_accuracy = train(
             args,
             model,
-            rank,
-            world_size,
+            local_rank,
             train_loader,
             optimizer,
             epoch,
             sampler=sampler1,
             profiler=torch_profiler,
         )
-        if rank == 0:
+        if local_rank == 0:
             memmax.update()
 
         if cfg.run_validation:
-            test_accuracy = validation(model, rank, world_size, test_loader)
+            test_accuracy = validation(model, local_rank, test_loader)
 
         scheduler.step()
 
-        if rank == 0:
+        if local_rank == 0:
 
             print(f"--> epoch {epoch} completed...entering save and stats zone")
 
@@ -569,7 +633,7 @@ def fsdp_main(rank, world_size, args):
 
         #         print(f"--> saved {model_save_name} to disk")
         # announce new val loss record:
-        if rank == 0 and curr_val_loss < best_val_loss:
+        if local_rank == 0 and curr_val_loss < best_val_loss:
 
             best_val_loss = curr_val_loss
             print(f"-->>>> New Val Loss Record: {best_val_loss}")
@@ -586,11 +650,11 @@ def fsdp_main(rank, world_size, args):
 
     print("Flops cnt and delays", FLOP, delays)
     # tflops_gpu = FLOP / 10**12 * np.reciprocal(np.array(delays))
-    if rank == 0:
+    if local_rank == 0:
         gflops_gpu = FLOP / 10**9 * np.reciprocal(np.array(delays))
         print(f"gflops per gpu={gflops_gpu}")
     # init_end_event.record()
-    if rank == 0:
+    if local_rank == 0:
         # inner_pbar.close()
         total_training_time = time.time() - training_start_time
         print(f"Total training time = {total_training_time:.2f}")
@@ -602,7 +666,7 @@ def fsdp_main(rank, world_size, args):
         # memory
         memmax.stop()
         if cfg.track_memory:
-            # print(f"total memory reserved: {mem_reserved_tracker}")
+            print(f"total memory reserved: {mem_reserved_tracker}")
             print(f"total memory allocated: {mem_alloc_tracker}")
 
         print(f"Training accuracy: {train_acc_tracking}")
@@ -610,7 +674,7 @@ def fsdp_main(rank, world_size, args):
             print(f"Validation accuracy: {val_acc_tracking}")
 
         # memory summary
-        if cfg.memory_report and rank == 0:
+        if cfg.memory_report and local_rank == 0:
             print(
                 f"CUDA Memory Summary After Last training:\n {torch.cuda.memory_summary()}"
             )
@@ -623,10 +687,10 @@ def fsdp_main(rank, world_size, args):
         # save_model = cfg.save_model
 
         # debug hang
-        # runs on all ranks
-        # print(f"rank {rank} calling barrier")
+        # runs on all local_ranks
+        # print(f"local_rank {local_rank} calling barrier")
         # dist.barrier()
-        # print(f"rank {rank} done w barrier, calling state_dict")
+        # print(f"local_rank {local_rank} done w barrier, calling state_dict")
 
     dist.barrier()
     cleanup()
@@ -656,11 +720,14 @@ if __name__ == "__main__":
     )
     print(f"temp dset loaded in main = len {len(temp_full_dataset)}")
     """
-
+    # gpus_per_machine = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    # mp.spawn(fn=run_fsdp,
+    #          args=(args,),
+    #          nprocs=gpus_per_machine,
+    #          join=True)
     mp.spawn(
         fsdp_main,
-        args=(
-            gpus_per_node,
+        args=(   
             args,
         ),
         nprocs=gpus_per_node,
