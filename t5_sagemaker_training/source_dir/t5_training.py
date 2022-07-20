@@ -174,7 +174,7 @@ def get_policies(cfg, local_rank):
                 print(f"bFloat16 enabled for mixed precision - using bfSixteen policy")
         elif cfg.use_fp16:
             mixed_precision_policy = policies.fpSixteen
-            if local_ == 0:
+            if local_rank == 0:
                 print(f"FP16 enabled. ")
         else:
             # mixed_precision_policy = policies.fpSixteen
