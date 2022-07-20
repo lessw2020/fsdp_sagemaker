@@ -338,25 +338,6 @@ def run_fsdp(local_rank: int, *args: Any) -> None:
     # fsdp params count (min_num_params)
     fsdp_params_count_min = 20000
 
-    # mixed precision policies
-
-    fpSixteen = MixedPrecision(
-        param_dtype=torch.float16,
-        # Gradient communication precision.
-        reduce_dtype=torch.float16,
-        # Buffer precision.
-        buffer_dtype=torch.float16,
-    )
-
-    bfSixteen = MixedPrecision(
-        param_dtype=torch.bfloat16,
-        # Gradient communication precision.
-        reduce_dtype=torch.bfloat16,
-        # Buffer precision.
-        buffer_dtype=torch.bfloat16,
-    )
-
-
     args = args[0]
     setup_args = get_setup_defaults(local_rank=local_rank)
     initialize_process_group(setup_args)
